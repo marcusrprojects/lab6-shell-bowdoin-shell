@@ -1,7 +1,7 @@
 /* 
  * bsh - the Bowdoin Shell
  * 
- * <PUT THE NAME OF ALL GROUP MEMBERS HERE>
+ * Marcus Ribeiro
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +61,7 @@ void sigquit_handler(int sig);
 void clearjob(job_t* job);
 void initjobs(job_t* jobs);
 int maxjid(job_t* jobs); 
-int addjob(job_t* jobs, pid_t pid, int state, char* cmdline);
+int addjob(job_t* jobs, pid_t pid, int state, char* cmdline); //addjob(jobs,pid,FG,
 int deletejob(job_t* jobs, pid_t pid); 
 pid_t fgpid(job_t* jobs);
 job_t* getjobpid(job_t* jobs, pid_t pid);
@@ -156,6 +156,50 @@ int main(int argc, char** argv) {
 */
 void eval(char* cmdline) {
   // TODO - implement me!
+  //char** argv; //how do i make this
+  char* argv[MAXARGS];
+  int if_bg = parseline(cmdline,argv);
+  if (!builtin_cmd(argv)) {
+	sigset_t mask;
+ 	sigemptyset(&mask);
+ 	sigaddset(&mask, SIGCHLD);
+	int pid;
+	sigprocmask(SIG_BLOCK, &mask, NULL); // block SIGCHLD
+	if ((pid = fork()) == 0) { //child
+		//run job
+		//unblock in child
+		setpgid(0, 0);
+		sigprocmask(SIG_UNBLOCK, &mask, NULL);
+		if ((argv[0][0] != '.') && (argv[0][0] != '/')) {
+			char new_buf[strlen(argv[0])+4];
+			strcpy(new_buf, "/bin/");
+			//new_buf = "/bin/";
+			strcat(new_buf, argv[0]);
+			argv[0] = new_buf;
+			//is this SAFE memory-wise?
+		}
+		if (execve(argv[0], argv, environ) == -1) {
+			//errno(); //print error message
+		}
+
+		//RUN IT or maybe pass it based on fg/bg
+			//if (pid2jid(pid)->state = FG) {
+				//waitfg();
+				//exec
+			//}
+	}
+	if (pid == -1) {
+		//errno
+		//exit
+	}
+
+	//parent
+	addjob(jobs, pid, UNDEF, argv[1]); //add child to job list. WHAT STATE?? Now it is set to UNDEF
+	sigprocmask(SIG_UNBLOCK, &mask, NULL); //unblock sigchild
+	if (!if_bg) {
+		waitfg(pid);
+	}
+  }
   return;
 }
 
@@ -244,6 +288,97 @@ int builtin_cmd(char** argv) {
  */
 void do_bgfg(char** argv) {
   // TODO - implement me!
+  //code for pid v.s. jid
+  //just 2 arguments
+  char* cmd = argv[0];
+
+  //for fg commands
+  if (!strcmp(cmd,"fg")) { //argv[0]
+	//eval(arg[1]);
+	//have parent wait before continuing
+	//argv[1] to fg
+	job_t* job;
+
+	int mistake_made = 0;
+
+	if (argv[1][0] == '%') { //jid
+		//update state
+		int jid = atoi(&argv[1][1]); //string that begins at this indicated character.
+		if (jid != 0) {
+			job = getjobjid(jobs, jid);
+			job->state = FG;
+			kill(-job->pid, SIGCONT); //should I check for an error?
+		}
+		else {
+			mistake_made++;
+		}
+	}
+
+	else {
+		int pid = atoi(&argv[1][1]);
+		job = getjobpid(jobs, pid);
+		if (!job && pid == 0) {
+			mistake_made++;
+		}
+		else {
+			job->state = FG; //do I use the arrow or a dot?
+			kill(-pid, SIGCONT);
+		}
+	}
+
+	if (mistake_made != 0) {
+		printf("fg command requires PID or %%jobid argument\n");
+		return;
+	}
+
+	//how to check if it is not a pid or a jid and to print "bg command requires PID or %jobid argument"
+
+	else {
+		waitfg(job->pid);
+	}
+  }
+
+  //for bg commands
+  else {
+	job_t* job;
+
+	int mistake_made = 0;
+
+	if (argv[1][0] == '%') { //jid
+		//update state
+		int jid = atoi(&argv[1][1]);
+		if (jid != 0) {
+			job = getjobjid(jobs, jid);
+			job->state = BG;
+			kill(-job->pid, SIGCONT); //should I check for an error?
+		}
+		else {
+			mistake_made++;
+		}
+	}
+
+	else {
+		int pid = atoi(&argv[1][1]);
+		job = getjobpid(jobs, pid);
+		if (!job && pid == 0) {
+			mistake_made++;
+		}
+		else {
+			job->state = BG;
+			kill(-pid, SIGCONT);;
+		}
+	}
+
+	if (mistake_made != 0) {
+		printf("bg command requires PID or %%jobid argument\n");
+		return;
+	}
+
+	else {
+		 printf("[%d] %d %s\n", job.jid, job.pid, argv[1]); //or is it jobs[i].cmdline);
+	}
+  }
+
   return;
 }
 
@@ -251,13 +386,27 @@ void do_bgfg(char** argv) {
  * waitfg - Block until process pid is no longer the foreground process.
  */
 void waitfg(pid_t pid) {
-  // TODO - implement me!
+
+  sigset_t mask;
+  sigemptyset(&mask);
+  //sigaddset(&mask, SIGCHLD);
+  //sigprocmask(SIG_BLOCK, &mask, NULL); // block SIGCHLD
+
+  //fgJobState = pid2jid(pid) -> state;
+
+  while (fgpid(jobs) == pid) {
+
+	sigsuspend(&mask);//do sigchild mask
+  }
+
   return;
 }
 
 /*****************
  * Signal handlers
  *****************/
+
+//use safe_printf
 
 /* 
  * sigchld_handler - The kernel sends a SIGCHLD to the shell whenever
@@ -268,6 +417,16 @@ void waitfg(pid_t pid) {
  */
 void sigchld_handler(int sig) {
   // TODO - implement me!
+  int status;
+  //pid_t pid = ; HOW DO I GET THE PID?
+  while ((pid = waitpid(-1, &status, WNOHANG)) > 0) { //is it NULL or &sig?, ADD WUNTRACED option
+	deletejob(jobs, pid);
+	//check how child was stopped-> signal, unhandled signal? print based on this
+	//call wifexited and such on status int.
+
+	//job terminated by __ signal
+  }
+	//waitpid(-1,&sig,NOHANG); //is this right? Is it supposed to be the pid of parent instead? how would I get that.
   return;
 }
 
@@ -276,7 +435,23 @@ void sigchld_handler(int sig) {
  *    types ctrl-c at the keyboard. Forward it to the foreground job.
  */
 void sigint_handler(int sig) {
-  // TODO - implement me!
+  job_t job;
+  int job_pid;
+
+  //find fg job and send it that signal
+  for (int i = 0; i < MAXJOBS; i++) {
+  	if (jobs[i].state == FG) {
+		job = jobs[i];
+		job_pid = jobs[i]->pid;
+		break;
+    }
+  }
+
+  //use kill only on foreground job
+  if (job) { //is there even a condition where this does not work? It's so unlikely
+	kill(job_pid, -SIGINT); //are the negatives right?
+  }
+
   return;
 }
 
@@ -285,7 +460,24 @@ void sigint_handler(int sig) {
  *     user types ctrl-z at the keyboard. Forward it to the foreground job.
  */
 void sigtstp_handler(int sig) {
-  // TODO - implement me!
+
+  job_t job;
+  int job_pid;
+
+  //find fg job and send it that signal
+  for (int i = 0; i < MAXJOBS; i++) {
+  	if (jobs[i].state == FG) {
+		job = jobs[i];
+		job_pid = jobs[i]->pid;
+		break;
+    }
+  }
+
+  //use kill only on foreground job
+  if (job) { //is there even a condition where this does not work? It's so unlikely
+	kill(job_pid, -SIGTSTP); //are the negatives right?
+  }
+
   return;
 }
 
