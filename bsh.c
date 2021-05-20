@@ -66,6 +66,7 @@ int deletejob(job_t* jobs, pid_t pid);
 pid_t fgpid(job_t* jobs);
 job_t* getjobpid(job_t* jobs, pid_t pid);
 job_t* getjobjid(job_t* jobs, int jid); 
+
 int pid2jid(pid_t pid); 
 void listjobs(job_t* jobs);
 
@@ -155,49 +156,94 @@ int main(int argc, char** argv) {
  * wait for it to terminate before returning eval.
 */
 void eval(char* cmdline) {
-  // TODO - implement me!
-  //char** argv; //how do i make this
+
   char* argv[MAXARGS];
+
   int if_bg = parseline(cmdline,argv);
+
   if (!builtin_cmd(argv)) {
+
 	sigset_t mask;
  	sigemptyset(&mask);
  	sigaddset(&mask, SIGCHLD);
-	int pid;
-	sigprocmask(SIG_BLOCK, &mask, NULL); // block SIGCHLD
-	if ((pid = fork()) == 0) { //child
+
+	int pid_result;
+
+	if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1) { // block SIGCHLD
+
+		error("sigprocmask is not blocking the sigchld in eval");
+	}
+
+	if ((pid_result = fork()) == 0) { //child
+
 		//run job
+		if (setpgid(0, 0) == -1) {
+
+			error("setpgid is not working in eval");
+		}
 		//unblock in child
-		setpgid(0, 0);
-		sigprocmask(SIG_UNBLOCK, &mask, NULL);
+		if (sigprocmask(SIG_UNBLOCK, &mask, NULL) == -1){
+
+			error("sigprocmask is not working in eval");
+		}
 		if ((argv[0][0] != '.') && (argv[0][0] != '/')) {
-			char new_buf[strlen(argv[0])+4];
-			strcpy(new_buf, "/bin/");
-			//new_buf = "/bin/";
+
+			char new_buf[MAXLINE];
+			char* path = "/bin/";
+
+			strcpy(new_buf, path);
 			strcat(new_buf, argv[0]);
+
 			argv[0] = new_buf;
-			//is this SAFE memory-wise?
-		}
-		if (execve(argv[0], argv, environ) == -1) {
-			//errno(); //print error message
 		}
 
-		//RUN IT or maybe pass it based on fg/bg
-			//if (pid2jid(pid)->state = FG) {
-				//waitfg();
-				//exec
-			//}
-	}
-	if (pid == -1) {
-		//errno
-		//exit
+		if (execve(argv[0], argv, environ) < 0) {
+
+			printf("%s: Command not found.\n",argv[0]);
+			exit(0);
+		}
 	}
 
-	//parent
-	addjob(jobs, pid, UNDEF, argv[1]); //add child to job list. WHAT STATE?? Now it is set to UNDEF
-	sigprocmask(SIG_UNBLOCK, &mask, NULL); //unblock sigchild
-	if (!if_bg) {
-		waitfg(pid);
+	if ((!if_bg)) { //foreground
+
+		if (addjob(jobs, pid_result, FG, argv[1])) {
+
+			if (sigprocmask(SIG_UNBLOCK, &mask, NULL) == -1) { //unblock sigchild
+
+				error("sigprocmask is not working in eval");
+			}
+
+			waitfg(pid_result);
+		}
+
+		else {
+			if(kill(-pid_result,SIGINT) == -1) {
+
+				error("problem with kill in eval");
+			}
+		}
+	}
+
+	else {
+		if (addjob(jobs, pid_result, BG, cmdline)){
+
+			if (sigprocmask(SIG_UNBLOCK, &mask, NULL) == -1) { //unblock sigchild
+
+				error("sigprocmask is not working in eval");
+			}
+
+			job_t* job = getjobpid(jobs,pid_result);
+
+			printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+		}
+
+		else {
+
+			if(kill(-pid_result,SIGINT) == -1) {
+
+				error("problem with kill in eval");
+			}
+		}
 	}
   }
   return;
@@ -287,96 +333,139 @@ int builtin_cmd(char** argv) {
  * do_bgfg - Execute the builtin bg and fg commands.
  */
 void do_bgfg(char** argv) {
-  // TODO - implement me!
-  //code for pid v.s. jid
-  //just 2 arguments
+
   char* cmd = argv[0];
 
   //for fg commands
-  if (!strcmp(cmd,"fg")) { //argv[0]
-	//eval(arg[1]);
-	//have parent wait before continuing
-	//argv[1] to fg
+  if (!strcmp(cmd,"fg")) {
+
 	job_t* job;
 
 	int mistake_made = 0;
 
+	if (!argv[1]) {
+
+		error("fg command requires PID or %%jobid argument\n");
+  	}
+
 	if (argv[1][0] == '%') { //jid
+
 		//update state
-		int jid = atoi(&argv[1][1]); //string that begins at this indicated character.
-		if (jid != 0) {
-			job = getjobjid(jobs, jid);
+		int jid = atoi(&argv[1][1]); //atoi takes in a string that begins at this indicated character, referenced by the address, and now inputted as a pointer.
+
+		if (jid != 0) { //if atoi does not fail
+
+			job = getjobjid(jobs, jid); //find the job
 			job->state = FG;
-			kill(-job->pid, SIGCONT); //should I check for an error?
+
+			if (kill(-job->pid, SIGCONT) == 1) {
+
+				error("kill not working with fg command using a jid in do_bgfg");
+			}
 		}
+
 		else {
+
 			mistake_made++;
 		}
 	}
 
-	else {
+	else { //pid
+
 		int pid = atoi(&argv[1][1]);
 		job = getjobpid(jobs, pid);
+
 		if (!job && pid == 0) {
+
 			mistake_made++;
 		}
+
 		else {
-			job->state = FG; //do I use the arrow or a dot?
-			kill(-pid, SIGCONT);
+
+			job->state = FG;
+
+			if (kill(-pid, SIGCONT) == -1) {
+
+				error("kill not working with fg command using a pid in do_bgfg");
+			}
 		}
 	}
 
 	if (mistake_made != 0) {
-		printf("fg command requires PID or %%jobid argument\n");
+
+		printf("argument must be a PID or %%jobid\n");
+
 		return;
 	}
 
-	//how to check if it is not a pid or a jid and to print "bg command requires PID or %jobid argument"
-
 	else {
+
 		waitfg(job->pid);
 	}
   }
 
   //for bg commands
   else {
+
 	job_t* job;
 
 	int mistake_made = 0;
 
+	if (!argv[1]) {
+
+		error("bg command requires PID or %%jobid argument\n");
+  	}
+
 	if (argv[1][0] == '%') { //jid
+
 		//update state
 		int jid = atoi(&argv[1][1]);
+
 		if (jid != 0) {
+
 			job = getjobjid(jobs, jid);
 			job->state = BG;
-			kill(-job->pid, SIGCONT); //should I check for an error?
+
+			if (kill(-job->pid, SIGCONT) == -1) {
+
+				error("kill not working with bg command using a jid in do_bgfg");
+			}
 		}
+
 		else {
 			mistake_made++;
 		}
 	}
 
 	else {
+
 		int pid = atoi(&argv[1][1]);
 		job = getjobpid(jobs, pid);
+
 		if (!job && pid == 0) {
+
 			mistake_made++;
 		}
+
 		else {
+
 			job->state = BG;
-			kill(-pid, SIGCONT);;
+
+			if (kill(-pid, SIGCONT) == -1) {
+
+				error("kill not working with bg command using a pid in do_bgfg");
+			}
 		}
 	}
 
 	if (mistake_made != 0) {
-		printf("bg command requires PID or %%jobid argument\n");
+
+		printf("argument must be a PID or %%jobid\n");
+
 		return;
 	}
 
-	else {
-		 printf("[%d] %d %s\n", job.jid, job.pid, argv[1]); //or is it jobs[i].cmdline);
-	}
+	printf("[%d] %d %s\n", job->jid, job->pid, job->cmdline);
   }
 
   return;
@@ -389,14 +478,10 @@ void waitfg(pid_t pid) {
 
   sigset_t mask;
   sigemptyset(&mask);
-  //sigaddset(&mask, SIGCHLD);
-  //sigprocmask(SIG_BLOCK, &mask, NULL); // block SIGCHLD
-
-  //fgJobState = pid2jid(pid) -> state;
 
   while (fgpid(jobs) == pid) {
 
-	sigsuspend(&mask);//do sigchild mask
+	sigsuspend(&mask);
   }
 
   return;
@@ -415,18 +500,35 @@ void waitfg(pid_t pid) {
  *     all available zombie children, but should not wait for any other
  *     currently running children to terminate.  
  */
-void sigchld_handler(int sig) {
-  // TODO - implement me!
-  int status;
-  //pid_t pid = ; HOW DO I GET THE PID?
-  while ((pid = waitpid(-1, &status, WNOHANG)) > 0) { //is it NULL or &sig?, ADD WUNTRACED option
-	deletejob(jobs, pid);
-	//check how child was stopped-> signal, unhandled signal? print based on this
-	//call wifexited and such on status int.
+void sigchld_handler(int sig) { // cleanup
 
-	//job terminated by __ signal
+  int status;
+  pid_t pid;
+
+  while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) { //check all children and if any child finishes, then clean a proceess and return its pid
+  //WNOHANG ensures that the child is not already terminated/stopped and WUNTRACED also waits for stopped/suspended children
+  //this signal is blocked by a signal mask in eval in advance so it only reaches this stage at the right time
+
+	//depending on how child exited... 3 options...
+	if (WIFEXITED(status)) { //child is finished, update
+
+		deletejob(jobs, pid);
+	}
+
+	if (WIFSIGNALED(status)) { //child exited due to unhandled signal. Update and account for message to print out about how it was signaled using printf.
+
+		job_t* job = getjobpid(jobs,pid);
+		safe_printf("Job [%d] (%d) terminated by signal %d\n",job->jid,job->pid, WTERMSIG(status));
+		deletejob(getjobpid(jobs,pid), pid);
+	}
+
+	if (WIFSTOPPED(status)) { //if stopped. Update state if necessary. don't delete job for this
+
+		getjobpid(jobs,pid)->state = ST;
+		safe_printf("Job [%d] (%d) stopped by signal %d\n",getjobpid(jobs,pid)->jid,getjobpid(jobs,pid)->pid,WSTOPSIG(status));
+	}
   }
-	//waitpid(-1,&sig,NOHANG); //is this right? Is it supposed to be the pid of parent instead? how would I get that.
+
   return;
 }
 
@@ -435,21 +537,15 @@ void sigchld_handler(int sig) {
  *    types ctrl-c at the keyboard. Forward it to the foreground job.
  */
 void sigint_handler(int sig) {
-  job_t job;
-  int job_pid;
 
-  //find fg job and send it that signal
-  for (int i = 0; i < MAXJOBS; i++) {
-  	if (jobs[i].state == FG) {
-		job = jobs[i];
-		job_pid = jobs[i]->pid;
-		break;
-    }
-  }
+  pid_t job_pid = fgpid(jobs);
 
-  //use kill only on foreground job
-  if (job) { //is there even a condition where this does not work? It's so unlikely
-	kill(job_pid, -SIGINT); //are the negatives right?
+  if (job_pid) {
+
+	if (kill(-job_pid,SIGINT) == -1) {
+
+		error("kill not working with command using the foreground pid in sigint_handler");
+	}
   }
 
   return;
@@ -461,21 +557,14 @@ void sigint_handler(int sig) {
  */
 void sigtstp_handler(int sig) {
 
-  job_t job;
-  int job_pid;
+  pid_t job_pid = fgpid(jobs);
 
-  //find fg job and send it that signal
-  for (int i = 0; i < MAXJOBS; i++) {
-  	if (jobs[i].state == FG) {
-		job = jobs[i];
-		job_pid = jobs[i]->pid;
-		break;
-    }
-  }
+  if (job_pid) {
 
-  //use kill only on foreground job
-  if (job) { //is there even a condition where this does not work? It's so unlikely
-	kill(job_pid, -SIGTSTP); //are the negatives right?
+	if (kill(-job_pid,SIGTSTP) == -1) {
+
+		error("kill not working with command using the foreground pid in sigtstp_handler");
+	}
   }
 
   return;
